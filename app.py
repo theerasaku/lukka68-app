@@ -3,10 +3,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import google.generativeai as genai
+import requests
+import urllib.parse
+import json
+import time
 
 st.set_page_config(page_title="ระบบข้อมูลลูกค้า 68", page_icon="🏗️", layout="wide")
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1H-MAlMRfzHhJQfHeCUj3_-smdxJcTmR9K2IvgL0vm8k/export?format=csv&gid=1958455392"
+DBD_API = "https://datawarehouse.dbd.go.th/api/juristic/search"
 
 @st.cache_data(ttl=3600)
 def load_data():
@@ -32,6 +37,39 @@ def load_data():
     df['ประเภท'] = df.apply(get_type, axis=1)
     return df
 
+def search_dbd(company_name):
+    """ค้นหาบริษัทจาก DBD Open Data API"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'Referer': 'https://datawarehouse.dbd.go.th/'
+        }
+        # ลอง DBD search API
+        params = {'keyword': company_name, 'limit': 10}
+        resp = requests.get(DBD_API, params=params, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data
+    except Exception as e:
+        pass
+    
+    # Fallback: ลอง open API อีกตัว
+    try:
+        url = f"https://datawarehouse.dbd.go.th/api/companyInfo/search?name={urllib.parse.quote(company_name)}"
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except:
+        pass
+    
+    return None
+
+def get_dbd_link(company_name):
+    """สร้าง URL ค้นหาตรงใน DBD Datawarehouse"""
+    encoded = urllib.parse.quote(company_name)
+    return f"https://datawarehouse.dbd.go.th/searchJuristic?juristicName={encoded}"
+
 try:
     df = load_data()
     data_ok = True
@@ -42,7 +80,7 @@ except Exception as e:
 with st.sidebar:
     st.title("🏗️ ระบบลูกค้า 68")
     st.divider()
-    page = st.radio("📌 เมนู", ["📊 Dashboard","🔍 ค้นหา","📋 สรุปกลุ่ม","💬 AI Chat"])
+    page = st.radio("📌 เมนู", ["📊 Dashboard","🔍 ค้นหา","📋 สรุปกลุ่ม","🏛️ ค้นหา DBD","💬 AI Chat"])
     st.divider()
     gemini_key = st.text_input("🔑 Gemini API Key", type="password", help="รับฟรีที่ aistudio.google.com")
     if gemini_key: st.success("✅ ใส่ Key แล้ว")
@@ -60,6 +98,7 @@ if not data_ok:
     st.error(f"ไม่สามารถโหลดข้อมูล: {err_msg}")
     st.stop()
 
+# ========================== DASHBOARD ==========================
 if page == "📊 Dashboard":
     st.title("📊 Dashboard ภาพรวมลูกค้า")
     st.caption(f"ข้อมูลจาก Google Sheet | {len(df):,} บริษัท")
@@ -93,8 +132,15 @@ if page == "📊 Dashboard":
         yc = df.groupby('ปีจดทะเบียน').size().reset_index(name='จำนวน').dropna()
         st.plotly_chart(px.area(yc,x='ปีจดทะเบียน',y='จำนวน',title='📅 บริษัทที่จดทะเบียนแต่ละปี',color_discrete_sequence=['#667eea']), use_container_width=True)
     st.subheader("💡 ความสัมพันธ์ ทุนจดทะเบียน vs รายได้รวม")
-    st.plotly_chart(px.scatter(df,x='ทุนจดทะเบียน',y='รายได้รวม',color='ประเภท',hover_name='บริษัท',size='รายได้รวม',size_max=40,log_x=True,log_y=True,title='ทุน vs รายได้ (log scale)'), use_container_width=True)
+    # FIX: fillna ก่อนใช้ size เพื่อป้องกัน NaN error
+    df_plot = df.copy()
+    df_plot['ทุนจดทะเบียน'] = df_plot['ทุนจดทะเบียน'].fillna(1)
+    df_plot['รายได้รวม_plot'] = df_plot['รายได้รวม'].fillna(1)
+    df_plot = df_plot[df_plot['ทุนจดทะเบียน'] > 0]
+    df_plot = df_plot[df_plot['รายได้รวม_plot'] > 0]
+    st.plotly_chart(px.scatter(df_plot,x='ทุนจดทะเบียน',y='รายได้รวม',color='ประเภท',hover_name='บริษัท',size='รายได้รวม_plot',size_max=40,log_x=True,log_y=True,title='ทุน vs รายได้ (log scale)'), use_container_width=True)
 
+# ========================== ค้นหา ==========================
 elif page == "🔍 ค้นหา":
     st.title("🔍 ค้นหาลูกค้า")
     c1,c2,c3 = st.columns([2,1,1])
@@ -115,6 +161,7 @@ elif page == "🔍 ค้นหา":
     st.dataframe(filt[dcols].reset_index(drop=True), use_container_width=True, height=450)
     st.download_button("⬇️ ดาวน์โหลดผลการค้นหา CSV", filt[dcols].to_csv(index=False,encoding='utf-8-sig'), "result.csv", "text/csv")
 
+# ========================== สรุปกลุ่ม ==========================
 elif page == "📋 สรุปกลุ่ม":
     st.title("📋 สรุปตามกลุ่ม")
     t1,t2,t3,t4 = st.tabs(["🏢 แยกประเภท","🏆 แยกเกรด","📅 แยกยุค","🔬 เปรียบเทียบ"])
@@ -129,7 +176,10 @@ elif page == "📋 สรุปกลุ่ม":
             gs = df.groupby('เกรด').agg(จำนวน=('บริษัท','count'),รายได้เฉลี่ย=('รายได้รวม','mean'),รายได้รวม=('รายได้รวม','sum'),ทุนเฉลี่ย=('ทุนจดทะเบียน','mean')).round(1).reset_index()
             st.dataframe(gs,use_container_width=True)
             if 'รวมคะแนน' in df.columns:
-                st.plotly_chart(px.scatter(df,x='รวมคะแนน',y='รายได้รวม',color='เกรด',hover_name='บริษัท',title='คะแนน vs รายได้',size='ทุนจดทะเบียน',size_max=40),use_container_width=True)
+                # FIX: fillna สำหรับ scatter size
+                df_s2 = df.dropna(subset=['รวมคะแนน','รายได้รวม']).copy()
+                df_s2['ทุน_plot'] = df_s2['ทุนจดทะเบียน'].fillna(1).clip(lower=1)
+                st.plotly_chart(px.scatter(df_s2,x='รวมคะแนน',y='รายได้รวม',color='เกรด',hover_name='บริษัท',title='คะแนน vs รายได้',size='ทุน_plot',size_max=40),use_container_width=True)
     with t3:
         de = df.dropna(subset=['ปีจดทะเบียน']).copy()
         de['ยุค'] = pd.cut(de['ปีจดทะเบียน'],bins=[2499,2519,2539,2559,2570],labels=['ก่อน 2520','2520-2539','2540-2559','2560+'])
@@ -153,17 +203,98 @@ elif page == "📋 สรุปกลุ่ม":
         else:
             st.info("เลือกบริษัทที่ต้องการเปรียบเทียบด้านบน")
 
+# ========================== ค้นหา DBD ==========================
+elif page == "🏛️ ค้นหา DBD":
+    st.title("🏛️ ค้นหาข้อมูลบริษัทจาก DBD")
+    st.markdown("""
+    ค้นหาข้อมูล **ทุนจดทะเบียน, ปีจดทะเบียน, ประเภทบริษัท, สถานะ** จากกรมพัฒนาธุรกิจการค้า (DBD)
+    """)
+    st.divider()
+
+    company_input = st.text_input("🔎 พิมพ์ชื่อบริษัทที่ต้องการค้นหา", placeholder="เช่น ซิโน-ไทย, กาญจนสิงขร, CPRAM")
+
+    if company_input:
+        col1, col2 = st.columns([1,1])
+        with col1:
+            search_btn = st.button("🔍 ค้นหาใน DBD", type="primary", use_container_width=True)
+        with col2:
+            dbd_link = get_dbd_link(company_input)
+            st.link_button("🌐 เปิดหน้า DBD โดยตรง", dbd_link, use_container_width=True)
+
+        if search_btn:
+            with st.spinner(f"กำลังค้นหา '{company_input}' ใน DBD..."):
+                result = search_dbd(company_input)
+
+            if result:
+                st.success("✅ พบข้อมูล")
+                # แสดงผล raw JSON สำหรับ debug
+                if isinstance(result, dict):
+                    items = result.get('data', result.get('result', result.get('items', [])))
+                elif isinstance(result, list):
+                    items = result
+                else:
+                    items = []
+
+                if items:
+                    rows = []
+                    for item in items[:10]:
+                        row = {
+                            'ชื่อบริษัท': item.get('juristicName', item.get('name', item.get('companyName', ''))),
+                            'เลขทะเบียน': item.get('juristicId', item.get('registrationNumber', item.get('id', ''))),
+                            'ประเภท': item.get('juristicType', item.get('type', '')),
+                            'ทุนจดทะเบียน': item.get('registerCapital', item.get('capital', '')),
+                            'วันจดทะเบียน': item.get('registerDate', item.get('registrationDate', '')),
+                            'สถานะ': item.get('statusCode', item.get('status', '')),
+                        }
+                        rows.append(row)
+                    result_df = pd.DataFrame(rows)
+                    st.dataframe(result_df, use_container_width=True)
+
+                    # บันทึกลง session state เพื่อเลือกบันทึก
+                    if 'dbd_results' not in st.session_state:
+                        st.session_state.dbd_results = []
+                    st.session_state.dbd_results = rows
+
+                    st.subheader("💾 บันทึกข้อมูลลง Google Sheet")
+                    st.info("ฟีเจอร์นี้กำลังพัฒนา — ขณะนี้สามารถ Export ข้อมูลเป็น CSV ได้")
+                    st.download_button(
+                        "⬇️ ดาวน์โหลดข้อมูล DBD (CSV)",
+                        pd.DataFrame(rows).to_csv(index=False, encoding='utf-8-sig'),
+                        f"dbd_{company_input}.csv",
+                        "text/csv"
+                    )
+                else:
+                    st.warning("ไม่พบข้อมูลที่ตรงกัน ลองกด 'เปิดหน้า DBD โดยตรง' แล้วค้นหาด้วยตนเอง")
+                    with st.expander("🔍 Raw API Response (Debug)"):
+                        st.json(result)
+            else:
+                st.warning("⚠️ ไม่สามารถเชื่อมต่อ DBD API ได้โดยตรง")
+                st.markdown(f"""
+**วิธีแก้ไข:** กดลิงก์ด้านบนเพื่อค้นหาใน DBD โดยตรง หรือลองค้นหาด้วยชื่อย่อ
+
+🔗 [คลิกค้นหา '{company_input}' ใน DBD Datawarehouse]({dbd_link})
+                """)
+
+    st.divider()
+    st.subheader("📋 บริษัทในฐานข้อมูลที่ยังไม่มีข้อมูล DBD")
+    missing = df[df['ทุนจดทะเบียน'].isna() | (df['ทุนจดทะเบียน'] == 0)][['บริษัท','ประเภท','เกรด']].head(20)
+    if len(missing) > 0:
+        st.caption(f"พบ {len(df[df['ทุนจดทะเบียน'].isna() | (df['ทุนจดทะเบียน'] == 0)])} บริษัทที่ไม่มีข้อมูลทุนจดทะเบียน")
+        for _, row in missing.iterrows():
+            col1, col2 = st.columns([3,1])
+            with col1:
+                st.write(f"🏢 {row['บริษัท']} ({row['ประเภท']})")
+            with col2:
+                st.link_button("ค้นหา DBD", get_dbd_link(row['บริษัท']), use_container_width=True)
+    else:
+        st.success("✅ บริษัททุกรายมีข้อมูลทุนจดทะเบียนครบ")
+
+# ========================== AI CHAT ==========================
 elif page == "💬 AI Chat":
     st.title("💬 ถามตอบ AI เกี่ยวกับข้อมูลลูกค้า")
     if not gemini_key:
         st.warning("⚠️ กรุณาใส่ Gemini API Key ในแถบซ้ายมือก่อน")
-        st.markdown("""
-**วิธีรับ Key ฟรี:**
-1. ไปที่ [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. Login ด้วย Google Account
-3. กด **Create API key**
-4. Copy มาวางในช่อง API Key ซ้ายมือ
-        """)
+        st.markdown("รับ Key ฟรีที่: https://aistudio.google.com/apikey")
         st.stop()
     try:
         genai.configure(api_key=gemini_key)
@@ -171,7 +302,8 @@ elif page == "💬 AI Chat":
     except Exception as e:
         st.error(f"API Key ไม่ถูกต้อง: {e}")
         st.stop()
-    top5 = df.nlargest(5,'รายได้รวม')[['บริษัท','รายได้รวม','เกรด' if 'เกรด' in df.columns else 'ประเภท']].to_string(index=False)
+    gcol = 'เกรด' if 'เกรด' in df.columns else 'ประเภท'
+    top5 = df.nlargest(5,'รายได้รวม')[['บริษัท','รายได้รวม',gcol]].to_string(index=False)
     ctx = f"""คุณคือ AI วิเคราะห์ข้อมูลลูกค้าบริษัทรับเหมาก่อสร้าง ตอบภาษาไทยเสมอ กระชับ ชัดเจน มีประโยชน์
 ข้อมูลสรุป {len(df)} ราย:
 - ประเภทบริษัท: {df['ประเภท'].value_counts().to_dict()}
