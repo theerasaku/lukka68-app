@@ -7,6 +7,11 @@ import requests
 import urllib.parse
 import json
 import time
+import io
+from boq_shelter import (
+    PROJECT_INFO, SECTIONS, build_boq_df, compute_summary,
+    CONTINGENCY_PCT, VAT_PCT,
+)
 
 st.set_page_config(page_title="ระบบข้อมูลลูกค้า 68", page_icon="🏗️", layout="wide")
 
@@ -80,7 +85,7 @@ except Exception as e:
 with st.sidebar:
     st.title("🏗️ ระบบลูกค้า 68")
     st.divider()
-    page = st.radio("📌 เมนู", ["📊 Dashboard","🔍 ค้นหา","📋 สรุปกลุ่ม","🏛️ ค้นหา DBD","💬 AI Chat"])
+    page = st.radio("📌 เมนู", ["📊 Dashboard","🔍 ค้นหา","📋 สรุปกลุ่ม","🏛️ ค้นหา DBD","💬 AI Chat","🏭 BOQ โรงคลุม Generator"])
     st.divider()
     gemini_key = st.text_input("🔑 Gemini API Key", type="password", help="รับฟรีที่ aistudio.google.com")
     if gemini_key: st.success("✅ ใส่ Key แล้ว")
@@ -335,3 +340,129 @@ Top 5 รายได้สูงสุด:
         if st.button("🗑️ ล้างประวัติ"):
             st.session_state.msgs = []
             st.rerun()
+
+# ========================== BOQ โรงคลุม Generator ==========================
+elif page == "🏭 BOQ โรงคลุม Generator":
+    st.title("🏭 BOQ โรงคลุมเครื่อง Generator")
+    st.caption("ใบถอดแบบปริมาณงานและประมาณราคาก่อสร้าง")
+
+    # ---- ข้อมูลโครงการ ----
+    st.subheader("📐 ข้อมูลโครงการ")
+    pi_cols = st.columns(len(PROJECT_INFO))
+    for col, (k, v) in zip(pi_cols, PROJECT_INFO.items()):
+        col.metric(k, v)
+
+    st.divider()
+
+    boq_df = build_boq_df()
+    section_totals, subtotal, contingency, before_vat, vat, grand_total = compute_summary(boq_df)
+
+    # ---- แสดงรายการแยกหมวด ----
+    st.subheader("📋 รายละเอียด BOQ")
+    for sec_code, sec_name, _ in SECTIONS:
+        sec_df = boq_df[boq_df["หมวด"] == sec_code].copy()
+        sec_total = section_totals.get(sec_code, 0)
+        with st.expander(f"**{sec_code} — {sec_name}**　　รวม {sec_total:,.2f} บาท", expanded=True):
+            display_df = sec_df[["รหัส","รายการ","หน่วย","ปริมาณ","ราคาต่อหน่วย","จำนวนเงิน","หมายเหตุ"]].copy()
+            display_df["ปริมาณ"] = display_df["ปริมาณ"].apply(lambda x: f"{x:,.2f}")
+            display_df["ราคาต่อหน่วย"] = display_df["ราคาต่อหน่วย"].apply(lambda x: f"{x:,.2f}")
+            display_df["จำนวนเงิน"] = display_df["จำนวนเงิน"].apply(lambda x: f"{x:,.2f}")
+            st.dataframe(display_df.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ---- สรุปยอดรวม ----
+    st.subheader("💰 สรุปงบประมาณ")
+    sum_col1, sum_col2 = st.columns([1, 1])
+    with sum_col1:
+        summary_rows = [(sec_code, sec_name, section_totals.get(sec_code, 0)) for sec_code, sec_name, _ in SECTIONS]
+        summary_df = pd.DataFrame(summary_rows, columns=["หมวด","รายการ","จำนวนเงิน (บาท)"])
+        summary_df["จำนวนเงิน (บาท)"] = summary_df["จำนวนเงิน (บาท)"].apply(lambda x: f"{x:,.2f}")
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    with sum_col2:
+        m1, m2 = st.columns(2)
+        m1.metric("รวมก่อน Contingency", f"{subtotal:,.2f} บาท")
+        m2.metric(f"สำรองเผื่อ ({int(CONTINGENCY_PCT*100)}%)", f"{contingency:,.2f} บาท")
+        m3, m4 = st.columns(2)
+        m3.metric("รวมก่อน VAT", f"{before_vat:,.2f} บาท")
+        m4.metric(f"VAT ({int(VAT_PCT*100)}%)", f"{vat:,.2f} บาท")
+        st.metric("💵 ราคารวมทั้งสิ้น (รวม VAT)", f"{grand_total:,.2f} บาท", delta=None)
+
+    st.divider()
+
+    # ---- กราฟสัดส่วนค่าใช้จ่าย ----
+    st.subheader("📊 สัดส่วนค่าใช้จ่ายแต่ละหมวด")
+    chart_df = pd.DataFrame([
+        {"หมวด": f"{sc} {sn.split('(')[0].strip()}", "จำนวนเงิน": section_totals.get(sc, 0)}
+        for sc, sn, _ in SECTIONS
+    ])
+    pie_fig = px.pie(
+        chart_df, values="จำนวนเงิน", names="หมวด",
+        title="สัดส่วนงบประมาณแต่ละหมวดงาน",
+        hole=0.4,
+        color_discrete_sequence=px.colors.qualitative.Set2,
+    )
+    pie_fig.update_traces(textposition="inside", textinfo="percent+label")
+    pie_fig.update_layout(showlegend=False)
+    bar_fig = px.bar(
+        chart_df.sort_values("จำนวนเงิน", ascending=True),
+        x="จำนวนเงิน", y="หมวด", orientation="h",
+        title="ค่าใช้จ่ายแต่ละหมวดงาน (บาท)",
+        color="จำนวนเงิน", color_continuous_scale="Blues",
+        text="จำนวนเงิน",
+    )
+    bar_fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+    bar_fig.update_layout(height=420, coloraxis_showscale=False)
+    gc1, gc2 = st.columns(2)
+    with gc1:
+        st.plotly_chart(pie_fig, use_container_width=True)
+    with gc2:
+        st.plotly_chart(bar_fig, use_container_width=True)
+
+    st.divider()
+
+    # ---- Export Excel ----
+    st.subheader("⬇️ ดาวน์โหลด BOQ")
+
+    @st.cache_data
+    def to_excel_bytes(df, sec_totals, subtotal_, contingency_, before_vat_, vat_, grand_total_):
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            # Sheet 1: รายละเอียดทั้งหมด
+            detail = df[["หมวด","รหัส","รายการ","หน่วย","ปริมาณ","ราคาต่อหน่วย","จำนวนเงิน","หมายเหตุ"]].copy()
+            detail.to_excel(writer, index=False, sheet_name="BOQ รายละเอียด", startrow=5)
+            ws = writer.sheets["BOQ รายละเอียด"]
+            ws["A1"] = "BOQ โรงคลุมเครื่อง Generator"
+            ws["A2"] = "ขนาด 2.00 × 8.00 m สูง 2.30 m"
+            ws["A3"] = f"ราคารวม VAT: {grand_total_:,.2f} บาท"
+            ws["A4"] = ""
+
+            # Sheet 2: สรุปหมวด
+            sum_rows = [{"หมวด": sc, "รายการ": sn, "จำนวนเงิน (บาท)": sec_totals.get(sc, 0)} for sc, sn, _ in SECTIONS]
+            sum_rows.append({"หมวด": "", "รายการ": "รวมทั้งหมด", "จำนวนเงิน (บาท)": subtotal_})
+            sum_rows.append({"หมวด": "", "รายการ": f"สำรองเผื่อ {int(CONTINGENCY_PCT*100)}%", "จำนวนเงิน (บาท)": contingency_})
+            sum_rows.append({"หมวด": "", "รายการ": "รวมก่อน VAT", "จำนวนเงิน (บาท)": before_vat_})
+            sum_rows.append({"หมวด": "", "รายการ": f"VAT {int(VAT_PCT*100)}%", "จำนวนเงิน (บาท)": vat_})
+            sum_rows.append({"หมวด": "", "รายการ": "ราคารวมทั้งสิ้น (รวม VAT)", "จำนวนเงิน (บาท)": grand_total_})
+            pd.DataFrame(sum_rows).to_excel(writer, index=False, sheet_name="สรุปงบประมาณ")
+        return buf.getvalue()
+
+    excel_bytes = to_excel_bytes(boq_df, section_totals, subtotal, contingency, before_vat, vat, grand_total)
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "📥 ดาวน์โหลด BOQ (.xlsx)",
+            data=excel_bytes,
+            file_name="BOQ_Generator_Shelter_2x8m.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with dl2:
+        csv_bytes = boq_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            "📥 ดาวน์โหลด BOQ (.csv)",
+            data=csv_bytes,
+            file_name="BOQ_Generator_Shelter_2x8m.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
