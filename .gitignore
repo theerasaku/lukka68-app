@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+dbd_data/dbd.sqlite3
+dbd_data/screenshots/

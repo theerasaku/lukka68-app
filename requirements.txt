@@ -3,3 +3,5 @@ pandas
 plotly
 google-generativeai
 openpyxl
+requests
+playwright
