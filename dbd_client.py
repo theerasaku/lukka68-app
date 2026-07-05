@@ -1,13 +1,17 @@
-"""ดึงข้อมูลนิติบุคคลและงบการเงินจาก datawarehouse.dbd.go.th
+"""ดึงข้อมูลนิติบุคคลจาก DBD
 
-DBD ไม่มี public API อย่างเป็นทางการ — โมดูลนี้ใช้ endpoint ภายในของหน้าเว็บ
-ซึ่งอาจเปลี่ยนได้ทุกเมื่อ จึงลองหลาย endpoint ตามลำดับและคืนผลจากตัวแรกที่ตอบ JSON
-ต้องรันจากเครื่อง/เซิร์ฟเวอร์ที่เข้าถึง datawarehouse.dbd.go.th ได้จริง
+แหล่งข้อมูลหลัก: DBD Open API อย่างเป็นทางการ
+    https://openapi.dbd.go.th/api/v1/juristic_person/{เลขทะเบียน 13 หลัก}
+ให้ ชื่อ ประเภท สถานะ ทุนจดทะเบียน วันจดทะเบียน ที่อยู่ (ไม่มีงบการเงิน/กรรมการ)
+
+งบการเงินอยู่บนหน้าเว็บ datawarehouse.dbd.go.th ซึ่งมี bot-protection (มัก 403)
+จึงลอง endpoint ภายในแบบ best-effort เท่านั้น — ถ้าไม่ได้ให้กรอกด้วยตนเองในแอพ
 """
 import re
 import requests
 
 BASE = "https://datawarehouse.dbd.go.th"
+OPEN_API = "https://openapi.dbd.go.th/api/v1/juristic_person/{tax_id}"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -91,6 +95,22 @@ def search_juristic(keyword, session=None):
     return data, info
 
 
+def fetch_open_api_profile(tax_id, session=None):
+    """ดึงโปรไฟล์จาก DBD Open API อย่างเป็นทางการ คืน (json, url/สาเหตุที่ล้ม)"""
+    session = session or requests.Session()
+    session.headers.update(HEADERS)
+    url = OPEN_API.format(tax_id=tax_id)
+    try:
+        resp = session.get(url, timeout=20)
+        if resp.status_code == 200:
+            return resp.json(), url
+        return None, f"{url} -> HTTP {resp.status_code}"
+    except ValueError:
+        return None, f"{url} -> ไม่ใช่ JSON"
+    except requests.RequestException as e:
+        return None, f"{url} -> {e.__class__.__name__}"
+
+
 def fetch_company(juristic_id, session=None):
     """ดึงโปรไฟล์ + งบการเงินของนิติบุคคล คืน dict:
     {profile: ..., financials: ..., profile_source: url, financial_source: url, errors: [...]}"""
@@ -101,13 +121,19 @@ def fetch_company(juristic_id, session=None):
 
     out = {"tax_id": tax_id, "profile_id": profile_id, "errors": []}
 
-    for jid in (profile_id, tax_id):
-        profile, info = _try_get_json(session, [u.format(jid=jid) for u in PROFILE_ENDPOINTS])
-        if profile is not None:
-            out["profile"], out["profile_source"] = profile, info
-            break
+    # โปรไฟล์: Open API ทางการก่อน (เสถียรสุด) แล้วค่อย fallback endpoint ภายใน
+    profile, info = fetch_open_api_profile(tax_id, session)
+    if profile is not None:
+        out["profile"], out["profile_source"] = profile, info
     else:
-        out["errors"].append(f"ดึงโปรไฟล์ไม่สำเร็จ: {info}")
+        out["errors"].append(f"Open API ไม่สำเร็จ: {info}")
+        for jid in (profile_id, tax_id):
+            profile, info = _try_get_json(session, [u.format(jid=jid) for u in PROFILE_ENDPOINTS])
+            if profile is not None:
+                out["profile"], out["profile_source"] = profile, info
+                break
+        else:
+            out["errors"].append(f"ดึงโปรไฟล์จาก datawarehouse ไม่สำเร็จ: {info}")
 
     for jid in (profile_id, tax_id):
         fin, info = _try_get_json(session, [u.format(jid=jid) for u in FINANCIAL_ENDPOINTS])
@@ -115,7 +141,9 @@ def fetch_company(juristic_id, session=None):
             out["financials"], out["financial_source"] = fin, info
             break
     else:
-        out["errors"].append(f"ดึงงบการเงินไม่สำเร็จ: {info}")
+        out["errors"].append(
+            f"ดึงงบการเงินไม่สำเร็จ ({info}) — งบการเงินไม่มีใน Open API ทางการ "
+            "และหน้าเว็บ datawarehouse มีระบบกันบอท: เปิดดูบนเว็บแล้วกรอกในแอพแทน")
 
     return out
 
@@ -138,27 +166,81 @@ def _to_number(v):
         return None
 
 
+def _flatten(obj, out=None):
+    """เดินทุกชั้นของ JSON เก็บ (key ที่ตัด namespace เช่น 'cd:' และแปลงเป็นตัวพิมพ์เล็ก, ค่า)
+    เรียงตามลำดับที่พบ เพื่อให้ค้นหา field ได้ไม่ว่าโครงสร้างจะซ้อนกี่ชั้น"""
+    if out is None:
+        out = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            norm = str(k).split(":")[-1].lower()
+            out.append((norm, v))
+            _flatten(v, out)
+    elif isinstance(obj, list):
+        for item in obj:
+            _flatten(item, out)
+    return out
+
+
+def _find_flat(flat, *substrings):
+    """คืนค่าแรกที่ชื่อ key มี substring ใดตัวหนึ่ง (เรียงลำดับความสำคัญตาม args)
+    ข้ามค่าที่เป็น dict/list/ว่าง"""
+    for sub in substrings:
+        for key, value in flat:
+            if sub in key and not isinstance(value, (dict, list)) and value not in (None, ""):
+                return value
+    return None
+
+
+def _address_text(flat):
+    """ประกอบที่อยู่จาก subtree ที่ key มีคำว่า address (Open API เก็บที่อยู่แบบซ้อนหลายชั้น)"""
+    for key, value in flat:
+        if "address" in key:
+            if isinstance(value, str) and len(value) > 10:
+                return value
+            if isinstance(value, dict):
+                leaves = [v for _, v in _flatten(value) if isinstance(v, str) and v.strip()]
+                if leaves:
+                    seen = []
+                    for leaf in leaves:
+                        if leaf not in seen:
+                            seen.append(leaf)
+                    return " ".join(seen)
+    return None
+
+
 def normalize_profile(raw):
-    """แปลง JSON โปรไฟล์ (โครงสร้างไม่แน่นอน) เป็น dict สำหรับ dbd_store.upsert_company"""
-    if isinstance(raw, list):
-        raw = raw[0] if raw else {}
-    if isinstance(raw, dict) and isinstance(raw.get("data"), (dict, list)):
-        return normalize_profile(raw["data"])
-    reg_date = _pick(raw, "registerDate", "registrationDate", "juristicRegisterDate")
+    """แปลง JSON โปรไฟล์เป็น dict สำหรับ dbd_store.upsert_company
+    รองรับทั้ง Open API (key แบบ cd:OrganizationJuristicNameTH ซ้อนหลายชั้น)
+    และ endpoint ภายในของ datawarehouse (key แบน ๆ เช่น juristicName)"""
+    flat = _flatten(raw)
+    reg_date = _find_flat(flat, "registerdate", "registrationdate")
     reg_year = None
     if reg_date:
         m = re.search(r"(\d{4})", str(reg_date))
         if m:
             y = int(m.group(1))
             reg_year = y if y > 2400 else y + 543  # ค.ศ. -> พ.ศ.
+
+    directors = None
+    for key, value in flat:
+        if "director" in key or "committee" in key:
+            if isinstance(value, list):
+                names = [v for v in value if isinstance(v, str)]
+                directors = ", ".join(names) if names else None
+            elif isinstance(value, str):
+                directors = value
+            if directors:
+                break
+
     return {
-        "company_name": _pick(raw, "juristicName", "juristicNameTH", "companyName", "name"),
-        "juristic_type": _pick(raw, "juristicType", "juristicTypeName", "type"),
-        "registered_capital": _to_number(_pick(raw, "registerCapital", "registeredCapital", "capital")),
+        "company_name": _find_flat(flat, "juristicnameth", "juristicname", "companyname", "nameth", "name"),
+        "juristic_type": _find_flat(flat, "juristictype", "typename", "type"),
+        "registered_capital": _to_number(_find_flat(flat, "registercapital", "registeredcapital", "capital")),
         "registration_year": reg_year,
-        "address": _pick(raw, "address", "fullAddress", "juristicAddress"),
-        "directors": ", ".join(raw.get("directors", [])) if isinstance(raw.get("directors"), list)
-                     else _pick(raw, "directors", "committee", "directorList"),
+        "status": _find_flat(flat, "juristicstatus", "status"),
+        "address": _address_text(flat),
+        "directors": directors,
     }
 
 

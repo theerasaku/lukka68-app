@@ -3,13 +3,13 @@
 
 รัน: streamlit run dbd_app.py
 """
-import urllib.parse
+import glob
+import os
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-import dbd_client
 import dbd_store
 
 st.set_page_config(page_title="DBD Company Lookup", page_icon="🏛️", layout="wide")
@@ -67,10 +67,18 @@ def show_company(detail):
         f"dbd_{c['tax_id']}_financials.csv", "text/csv",
     )
 
+    shots = sorted(glob.glob(os.path.join(os.path.dirname(__file__), "dbd_data", "screenshots",
+                                          f"{c['tax_id']}_*.png")))
+    if shots:
+        with st.expander(f"📸 สกรีนช็อตจากเว็บ DBD ({len(shots)} รูป)"):
+            for shot in shots:
+                st.image(shot, caption=os.path.basename(shot), use_container_width=True)
 
-def save_fetch_result(tax_id, result):
-    """บันทึกผลจาก dbd_client.fetch_company ลง SQLite คืนจำนวนปีงบที่บันทึก"""
-    profile = dbd_client.normalize_profile(result.get("profile") or {})
+
+def save_browser_result(result):
+    """บันทึกผลจาก dbd_browser.lookup ลง SQLite คืนจำนวนปีงบที่บันทึก"""
+    tax_id = result["tax_id"]
+    profile = result.get("profile") or {}
     dbd_store.upsert_company(
         tax_id=tax_id,
         company_name=profile.get("company_name") or f"(ไม่ทราบชื่อ) {tax_id}",
@@ -79,10 +87,11 @@ def save_fetch_result(tax_id, result):
         registration_year=profile.get("registration_year"),
         address=profile.get("address"),
         directors=profile.get("directors"),
-        source=result.get("profile_source") or "datawarehouse.dbd.go.th",
+        source="datawarehouse.dbd.go.th (Chrome)",
     )
-    fin_rows = dbd_client.normalize_financials(result.get("financials"))
+    fin_rows = result.get("financials") or []
     for row in fin_rows:
+        row = dict(row)
         dbd_store.upsert_financial(tax_id, row.pop("fiscal_year"), **row)
     return len(fin_rows)
 
@@ -91,71 +100,58 @@ st.title("🏛️ DBD Company Lookup")
 st.caption("ค้นหา รายได้ กำไร ปีจดทะเบียน ทุนจดทะเบียน กรรมการ จาก datawarehouse.dbd.go.th "
            "— ผลลัพธ์ถูกบันทึกลงฐานข้อมูลในเครื่อง (SQLite) เพื่อเรียกใช้ซ้ำได้แม้ DBD ล่ม")
 
-tab_live, tab_saved = st.tabs(["🌐 ดึงข้อมูลสดจาก DBD", "💾 ฐานข้อมูลที่บันทึกไว้"])
+tab_live, tab_saved = st.tabs(["🖥️ ดึงข้อมูลผ่าน Chrome", "💾 ฐานข้อมูลที่บันทึกไว้"])
 
-# ---------------- ดึงสดจาก DBD ----------------
+# ---------------- ดึงผ่าน Chrome ----------------
 with tab_live:
-    st.markdown("ใส่ **ชื่อบริษัท**, **เลขทะเบียนนิติบุคคล 13 หลัก** หรือวาง **URL หน้าโปรไฟล์ DBD** "
-                "(เช่น `https://datawarehouse.dbd.go.th/company/profile/50105534106050`)")
+    st.markdown("""แอพจะ**เปิด Chrome จริง** เข้าเว็บ DBD พิมพ์ค้นหา แคปหน้าจอ แล้วแกะข้อมูลบันทึกลงฐานข้อมูลอัตโนมัติ
+(เบราว์เซอร์จริงผ่านระบบกันบอทของ DBD ได้ ต่างจากการยิง API ที่โดน 403)
+
+ใส่ **ชื่อบริษัท**, **เลขทะเบียน 13 หลัก** หรือวาง **URL โปรไฟล์ DBD** ก็ได้""")
     query = st.text_input("🔎 ค้นหา", placeholder="ธรรมสรณ์ หรือ 0105534106050 หรือ URL โปรไฟล์ DBD")
+    show_window = st.checkbox("แสดงหน้าต่าง Chrome ขณะทำงาน", value=True,
+                              help="เปิดไว้จะเห็น Chrome ทำงานจริง และช่วยผ่านระบบกันบอทได้ดีกว่า")
 
-    if query:
-        tax_id, _ = dbd_client.extract_juristic_id(query)
+    if query and st.button("🖥️ เปิด Chrome ดึงข้อมูลและบันทึก", type="primary"):
+        try:
+            import dbd_browser
+        except ImportError:
+            st.error("ยังไม่ได้ติดตั้ง Playwright — รันคำสั่งนี้ใน Terminal ก่อน:")
+            st.code("python3 -m pip install playwright", language="bash")
+            st.stop()
+        with st.spinner("Chrome กำลังเข้าเว็บ DBD ค้นหา และแคปหน้าจอ... (ราว 15-30 วินาที)"):
+            try:
+                result = dbd_browser.lookup(query, headless=not show_window)
+            except Exception as e:
+                st.error(f"เปิด Chrome ไม่สำเร็จ: {e}")
+                st.markdown("ถ้าข้อความบอกว่าหา Chrome/Chromium ไม่เจอ รันคำสั่งนี้แล้วลองใหม่:")
+                st.code("python3 -m playwright install chromium", language="bash")
+                st.stop()
 
-        # กรณีเป็นชื่อบริษัท: ค้นหาก่อนเพื่อให้เลือกเลขทะเบียน
-        if not tax_id:
-            if st.button("🔍 ค้นหาชื่อใน DBD", type="primary"):
-                with st.spinner("กำลังค้นหาใน DBD..."):
-                    session = dbd_client.make_session()
-                    results, info = dbd_client.search_juristic(query, session)
-                st.session_state.pop("dbd_search_results", None)
-                if results:
-                    st.session_state.dbd_search_results = results
-                    st.caption(f"endpoint ที่ใช้: {info}")
-                else:
-                    st.error(f"ค้นหาไม่สำเร็จ: {info}")
-                    st.markdown(
-                        f"เปิดค้นหาบนเว็บ DBD โดยตรง: "
-                        f"[คลิกที่นี่](https://datawarehouse.dbd.go.th/searchJuristic?juristicName={urllib.parse.quote(query)}) "
-                        "แล้วนำเลขทะเบียน 13 หลัก หรือ URL โปรไฟล์ กลับมาวางในช่องค้นหา")
-            results = st.session_state.get("dbd_search_results")
-            if results:
-                options = {}
-                for r in results[:20]:
-                    if isinstance(r, dict):
-                        name = r.get("juristicName") or r.get("name") or str(r)[:60]
-                        jid = r.get("juristicID") or r.get("juristicId") or r.get("id") or ""
-                        options[f"{name} ({jid})"] = jid
-                picked = st.selectbox("เลือกบริษัทจากผลค้นหา", list(options.keys()))
-                tax_id, _ = dbd_client.extract_juristic_id(options[picked])
+        if result.get("error"):
+            st.warning(f"⚠️ {result['error']}")
 
-        if tax_id:
-            st.info(f"เลขทะเบียนนิติบุคคล: **{tax_id}**")
-            if st.button("⬇️ ดึงข้อมูลจาก DBD และบันทึก", type="primary"):
-                with st.spinner(f"กำลังดึงข้อมูล {tax_id} จาก DBD..."):
-                    result = dbd_client.fetch_company(tax_id)
-                got_profile = result.get("profile") is not None
-                got_fin = result.get("financials") is not None
-                if got_profile or got_fin:
-                    n_years = save_fetch_result(tax_id, result)
-                    st.success(f"✅ บันทึกแล้ว (งบการเงิน {n_years} ปี)")
-                    for err in result.get("errors", []):
-                        st.warning(err)
-                    with st.expander("Raw response (debug)"):
-                        st.json({k: v for k, v in result.items() if k in ("profile", "financials",
-                                 "profile_source", "financial_source")})
-                    detail = dbd_store.get_company(tax_id)
-                    if detail:
-                        show_company(detail)
-                else:
-                    st.error("ไม่สามารถดึงข้อมูลจาก DBD ได้")
-                    for err in result.get("errors", []):
-                        st.caption(err)
-                    st.markdown(f"""
-**สาเหตุที่พบบ่อย:** DBD บล็อกการเรียกอัตโนมัติ / เปลี่ยน endpoint / เครือข่ายเข้าถึงไม่ได้
+        if result.get("tax_id") and (result.get("profile") or result.get("financials")):
+            n_years = save_browser_result(result)
+            st.success(f"✅ บันทึกลงฐานข้อมูลแล้ว (งบการเงิน {n_years} ปี)")
+            if result.get("profile", {}).get("status"):
+                st.info(f"สถานะนิติบุคคล: {result['profile']['status']}")
 
-**ทางเลือก:** เปิด [หน้าโปรไฟล์บน DBD](https://datawarehouse.dbd.go.th/company/profile/5{tax_id})
-ดูข้อมูลแล้วบันทึกด้วยตนเองในแท็บ "ฐานข้อมูลที่บันทึกไว้" — ข้อมูลจะถูกเก็บไว้เรียกใช้ซ้ำเหมือนกัน""")
+            if result.get("screenshots"):
+                st.markdown("#### 📸 หน้าจอที่แคปจากเว็บ DBD")
+                for shot in result["screenshots"]:
+                    st.image(shot, caption=os.path.basename(shot), use_container_width=True)
+
+            with st.expander("ข้อมูลดิบที่แกะได้ (debug)"):
+                st.json({"profile": result.get("profile"), "financials": result.get("financials")})
+
+            detail = dbd_store.get_company(result["tax_id"])
+            if detail:
+                show_company(detail)
+        elif not result.get("error"):
+            st.error("แกะข้อมูลจากหน้าเว็บไม่ได้ — ดูสกรีนช็อตด้านล่างว่าหน้าเว็บแสดงอะไร")
+            for shot in result.get("screenshots", []):
+                st.image(shot, caption=os.path.basename(shot), use_container_width=True)
 
 # ---------------- ฐานข้อมูลที่บันทึกไว้ ----------------
 with tab_saved:

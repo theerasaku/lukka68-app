@@ -4,3 +4,4 @@ plotly
 google-generativeai
 openpyxl
 requests
+playwright
