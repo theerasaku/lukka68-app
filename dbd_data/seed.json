@@ -1,0 +1,42 @@
+{
+  "companies": [
+    {
+      "tax_id": "0105534106050",
+      "company_name": "บริษัท ธรรมสรณ์ จำกัด",
+      "juristic_type": "บจก.",
+      "registered_capital": 300000000,
+      "registration_year": 2534,
+      "address": "156/20 ถ.เพชรบุรี แขวงถนนเพชรบุรี เขตราชเทวี กรุงเทพมหานคร 10400",
+      "directors": "นายธิติ โตวิวัฒน์",
+      "source": "datawarehouse.dbd.go.th (สกรีนช็อตผู้ใช้) + web search",
+      "financials": [
+        {
+          "fiscal_year": 2567,
+          "revenue_main": 3495388018.72,
+          "revenue_total": 3657353714.62,
+          "cost_of_sales": 2273819640.75,
+          "gross_profit": 1221568377.97,
+          "sga_expense": 1054582655.49,
+          "total_expense": 3328402296.24,
+          "interest_expense": 16974716.04,
+          "profit_before_tax": 311976702.34,
+          "income_tax": 72431945.23,
+          "net_profit": 239544757.11
+        },
+        {
+          "fiscal_year": 2568,
+          "revenue_main": 3301181524.98,
+          "revenue_total": 3430118188.81,
+          "cost_of_sales": 2150533522.60,
+          "gross_profit": 1150648002.38,
+          "sga_expense": 1028965811.45,
+          "total_expense": 3179499334.05,
+          "interest_expense": 12890608.08,
+          "profit_before_tax": 237728246.68,
+          "income_tax": 51874265.67,
+          "net_profit": 185853981.01
+        }
+      ]
+    }
+  ]
+}

@@ -7,8 +7,10 @@ import requests
 import urllib.parse
 import json
 import time
+import dbd_store
 
 st.set_page_config(page_title="ระบบข้อมูลลูกค้า 68", page_icon="🏗️", layout="wide")
+dbd_store.seed_if_empty()
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1H-MAlMRfzHhJQfHeCUj3_-smdxJcTmR9K2IvgL0vm8k/export?format=csv&gid=1958455392"
 DBD_API = "https://datawarehouse.dbd.go.th/api/juristic/search"
@@ -211,6 +213,105 @@ elif page == "🏛️ ค้นหา DBD":
     """)
     st.divider()
 
+    # ---------------- ฐานข้อมูล DBD ที่บันทึกไว้ (Local SQLite) ----------------
+    st.subheader("💾 ฐานข้อมูล DBD ที่บันทึกไว้")
+    st.caption("ข้อมูลชุดนี้บันทึกไว้ในเครื่อง (SQLite) เพื่อเรียกใช้ซ้ำ โดยไม่ต้องพึ่งการดึงข้อมูลสดจาก DBD ซึ่งมักถูกบล็อกหรือไม่เสถียร")
+    saved_keyword = st.text_input("🔎 ค้นหาในฐานข้อมูลที่บันทึกไว้", placeholder="ชื่อบริษัท หรือ เลขทะเบียนนิติบุคคล", key="saved_kw")
+    saved_companies = dbd_store.search_companies(saved_keyword)
+
+    if saved_companies:
+        pick_names = [f"{c['company_name']} ({c['tax_id']})" for c in saved_companies]
+        picked = st.selectbox("เลือกบริษัทเพื่อดูรายละเอียด", pick_names)
+        picked_tax_id = saved_companies[pick_names.index(picked)]['tax_id']
+        detail = dbd_store.get_company(picked_tax_id)
+        c = detail['company']
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric("ทุนจดทะเบียน", f"{(c['registered_capital'] or 0):,.0f} บาท")
+        i2.metric("ปีจดทะเบียน", f"พ.ศ. {c['registration_year']}" if c['registration_year'] else "-")
+        i3.metric("ประเภท", c['juristic_type'] or "-")
+        i4.metric("เลขทะเบียน", c['tax_id'])
+        st.write(f"**กรรมการ:** {c['directors'] or '-'}")
+        st.write(f"**ที่อยู่:** {c['address'] or '-'}")
+        if c['source']:
+            st.caption(f"แหล่งข้อมูล: {c['source']}")
+
+        fin = detail['financials']
+        if fin:
+            st.markdown("##### 📊 งบการเงินรายปี")
+            fin_df = pd.DataFrame(fin).drop(columns=['tax_id'])
+            fin_df = fin_df.rename(columns={
+                'fiscal_year': 'ปี', 'revenue_main': 'รายได้หลัก', 'revenue_total': 'รายได้รวม',
+                'cost_of_sales': 'ต้นทุนขาย', 'gross_profit': 'กำไรขั้นต้น', 'sga_expense': 'ค่าใช้จ่ายขายและบริการ',
+                'total_expense': 'รายจ่ายรวม', 'interest_expense': 'ดอกเบี้ยจ่าย', 'profit_before_tax': 'กำไรก่อนภาษี',
+                'income_tax': 'ภาษีเงินได้', 'net_profit': 'กำไรสุทธิ',
+            })
+            st.dataframe(fin_df, use_container_width=True)
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name='รายได้รวม', x=fin_df['ปี'], y=fin_df['รายได้รวม']))
+            fig.add_trace(go.Bar(name='กำไรสุทธิ', x=fin_df['ปี'], y=fin_df['กำไรสุทธิ']))
+            fig.update_layout(barmode='group', title=f"รายได้รวม vs กำไรสุทธิ - {c['company_name']}")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("ยังไม่มีข้อมูลงบการเงินสำหรับบริษัทนี้")
+    else:
+        st.info("ยังไม่มีข้อมูลในฐานข้อมูล หรือไม่พบรายการที่ค้นหา — เพิ่มข้อมูลได้ด้านล่าง")
+
+    with st.expander("➕ เพิ่ม / แก้ไขข้อมูลบริษัทด้วยตนเอง"):
+        st.caption("เนื่องจาก DBD ไม่มี public API ที่เสถียร ให้คัดลอกข้อมูลจากหน้าเว็บ datawarehouse.dbd.go.th มากรอกที่นี่ แล้วระบบจะบันทึกไว้ใช้ซ้ำ")
+        with st.form("company_form"):
+            st.markdown("**ข้อมูลนิติบุคคล**")
+            f_tax_id = st.text_input("เลขทะเบียนนิติบุคคล (13 หลัก)")
+            f_name = st.text_input("ชื่อบริษัท")
+            f_type = st.selectbox("ประเภท", ["บจก.", "หจก.", "บมจ.", "JV", "อื่นๆ"])
+            f_capital = st.number_input("ทุนจดทะเบียน (บาท)", min_value=0.0, step=100000.0)
+            f_year = st.number_input("ปีจดทะเบียน (พ.ศ.)", min_value=2400, max_value=2600, step=1, value=2500)
+            f_directors = st.text_input("กรรมการ (คั่นด้วย , หากมีหลายคน)")
+            f_address = st.text_input("ที่อยู่")
+            f_source = st.text_input("แหล่งข้อมูล", placeholder="เช่น datawarehouse.dbd.go.th (สกรีนช็อต)")
+            company_submit = st.form_submit_button("💾 บันทึกข้อมูลนิติบุคคล")
+            if company_submit:
+                if f_tax_id and f_name:
+                    dbd_store.upsert_company(
+                        tax_id=f_tax_id.strip(), company_name=f_name.strip(), juristic_type=f_type,
+                        registered_capital=f_capital or None, registration_year=int(f_year) if f_year else None,
+                        address=f_address or None, directors=f_directors or None, source=f_source or None,
+                    )
+                    st.success(f"✅ บันทึก {f_name} แล้ว")
+                    st.rerun()
+                else:
+                    st.error("กรุณากรอกเลขทะเบียนนิติบุคคลและชื่อบริษัท")
+
+        st.markdown("---")
+        with st.form("financial_form"):
+            st.markdown("**งบการเงินรายปี**")
+            g_tax_id = st.text_input("เลขทะเบียนนิติบุคคล (ของบริษัทที่บันทึกไว้แล้ว)")
+            g_year = st.number_input("ปี (พ.ศ.)", min_value=2400, max_value=2600, step=1, value=2568, key="fy")
+            g_rev_main = st.number_input("รายได้หลัก", step=1000.0, format="%.2f")
+            g_rev_total = st.number_input("รายได้รวม", step=1000.0, format="%.2f")
+            g_cost = st.number_input("ต้นทุนขาย", step=1000.0, format="%.2f")
+            g_gross = st.number_input("กำไรขั้นต้น", step=1000.0, format="%.2f")
+            g_sga = st.number_input("ค่าใช้จ่ายในการขายและบริการ", step=1000.0, format="%.2f")
+            g_total_exp = st.number_input("รายจ่ายรวม", step=1000.0, format="%.2f")
+            g_interest = st.number_input("ดอกเบี้ยจ่าย", step=1000.0, format="%.2f")
+            g_pretax = st.number_input("กำไรก่อนภาษี", step=1000.0, format="%.2f")
+            g_tax = st.number_input("ภาษีเงินได้", step=1000.0, format="%.2f")
+            g_net = st.number_input("กำไรสุทธิ", step=1000.0, format="%.2f")
+            fin_submit = st.form_submit_button("💾 บันทึกงบการเงินปีนี้")
+            if fin_submit:
+                if g_tax_id:
+                    dbd_store.upsert_financial(
+                        g_tax_id.strip(), int(g_year), revenue_main=g_rev_main or None, revenue_total=g_rev_total or None,
+                        cost_of_sales=g_cost or None, gross_profit=g_gross or None, sga_expense=g_sga or None,
+                        total_expense=g_total_exp or None, interest_expense=g_interest or None,
+                        profit_before_tax=g_pretax or None, income_tax=g_tax or None, net_profit=g_net or None,
+                    )
+                    st.success(f"✅ บันทึกงบการเงินปี {int(g_year)} แล้ว")
+                    st.rerun()
+                else:
+                    st.error("กรุณากรอกเลขทะเบียนนิติบุคคล")
+
+    st.divider()
+    st.subheader("🌐 ค้นหาสดจาก DBD API (ทดลอง)")
     company_input = st.text_input("🔎 พิมพ์ชื่อบริษัทที่ต้องการค้นหา", placeholder="เช่น ซิโน-ไทย, กาญจนสิงขร, CPRAM")
 
     if company_input:
