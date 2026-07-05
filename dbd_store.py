@@ -115,6 +115,15 @@ def search_companies(keyword=""):
     return [dict(r) for r in rows]
 
 
+def delete_company(tax_id):
+    """ลบบริษัทและงบการเงินทั้งหมดของบริษัทนั้น"""
+    conn = get_connection()
+    conn.execute("DELETE FROM financials WHERE tax_id = ?", (tax_id,))
+    conn.execute("DELETE FROM companies WHERE tax_id = ?", (tax_id,))
+    conn.commit()
+    conn.close()
+
+
 def seed_if_empty():
     """โหลดข้อมูลตั้งต้นจาก dbd_data/seed.json เข้า SQLite ถ้ายังไม่เคยมีบริษัทนั้นอยู่"""
     if not os.path.exists(SEED_PATH):

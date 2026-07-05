@@ -45,21 +45,32 @@ def show_company(detail):
         return
     st.markdown("#### 📊 งบการเงินรายปี")
     fin_df = pd.DataFrame(fin).drop(columns=["tax_id"]).rename(columns=FIN_LABELS)
+    # คอลัมน์ที่เป็น None ทั้งแถวจะมี dtype เป็น object — แปลงเป็นตัวเลขก่อน ไม่งั้นคำนวณ/พล็อตพัง
+    for col in fin_df.columns:
+        if col != "ปี":
+            fin_df[col] = pd.to_numeric(fin_df[col], errors="coerce")
     st.dataframe(fin_df, use_container_width=True)
 
-    g1, g2 = st.columns(2)
-    with g1:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(name="รายได้รวม", x=fin_df["ปี"], y=fin_df["รายได้รวม"]))
-        fig.add_trace(go.Bar(name="กำไรสุทธิ", x=fin_df["ปี"], y=fin_df["กำไรสุทธิ"]))
-        fig.update_layout(barmode="group", title="รายได้รวม vs กำไรสุทธิ")
-        st.plotly_chart(fig, use_container_width=True)
-    with g2:
-        margin = (fin_df["กำไรสุทธิ"] / fin_df["รายได้รวม"] * 100).round(2)
-        fig2 = go.Figure(go.Scatter(x=fin_df["ปี"], y=margin, mode="lines+markers+text",
-                                    text=[f"{v}%" for v in margin], textposition="top center"))
-        fig2.update_layout(title="อัตรากำไรสุทธิ (%)", yaxis_title="%")
-        st.plotly_chart(fig2, use_container_width=True)
+    has_revenue = fin_df["รายได้รวม"].notna().any()
+    has_profit = fin_df["กำไรสุทธิ"].notna().any()
+    if has_revenue or has_profit:
+        g1, g2 = st.columns(2)
+        with g1:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="รายได้รวม", x=fin_df["ปี"], y=fin_df["รายได้รวม"]))
+            fig.add_trace(go.Bar(name="กำไรสุทธิ", x=fin_df["ปี"], y=fin_df["กำไรสุทธิ"]))
+            fig.update_layout(barmode="group", title="รายได้รวม vs กำไรสุทธิ")
+            st.plotly_chart(fig, use_container_width=True)
+        with g2:
+            if has_revenue and has_profit:
+                margin = (fin_df["กำไรสุทธิ"] / fin_df["รายได้รวม"] * 100).round(2)
+                fig2 = go.Figure(go.Scatter(x=fin_df["ปี"], y=margin, mode="lines+markers+text",
+                                            text=[("" if pd.isna(v) else f"{v}%") for v in margin],
+                                            textposition="top center"))
+                fig2.update_layout(title="อัตรากำไรสุทธิ (%)", yaxis_title="%")
+                st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.warning("มีข้อมูลปีงบ แต่ตัวเลขว่างทั้งหมด — ลองดึงข้อมูลใหม่ หรือกรอกตัวเลขด้วยตนเองด้านล่าง")
 
     st.download_button(
         "⬇️ ดาวน์โหลดงบการเงิน (CSV)",
@@ -142,8 +153,13 @@ with tab_live:
                 for shot in result["screenshots"]:
                     st.image(shot, caption=os.path.basename(shot), use_container_width=True)
 
+            if not result.get("financials"):
+                st.warning("แกะตัวเลขงบการเงินจากหน้าเว็บไม่ได้ — เปิด debug ด้านล่างแล้วส่งข้อความดิบ"
+                           "ให้ผู้พัฒนาเพื่อปรับ parser")
             with st.expander("ข้อมูลดิบที่แกะได้ (debug)"):
                 st.json({"profile": result.get("profile"), "financials": result.get("financials")})
+                if result.get("financial_text"):
+                    st.text_area("ข้อความดิบจากหน้างบการเงิน", result["financial_text"], height=250)
 
             detail = dbd_store.get_company(result["tax_id"])
             if detail:
@@ -161,8 +177,13 @@ with tab_saved:
         st.caption(f"พบ {len(companies)} บริษัทในฐานข้อมูล")
         names = [f"{c['company_name']} ({c['tax_id']})" for c in companies]
         picked = st.selectbox("เลือกบริษัท", names)
-        detail = dbd_store.get_company(companies[names.index(picked)]["tax_id"])
+        picked_tax_id = companies[names.index(picked)]["tax_id"]
+        detail = dbd_store.get_company(picked_tax_id)
         show_company(detail)
+        if st.button("🗑️ ลบข้อมูลบริษัทนี้ออกจากฐานข้อมูล"):
+            dbd_store.delete_company(picked_tax_id)
+            st.success("ลบแล้ว")
+            st.rerun()
     else:
         st.info("ไม่พบบริษัทในฐานข้อมูล — ดึงข้อมูลจากแท็บแรก หรือเพิ่มด้วยตนเองด้านล่าง")
 

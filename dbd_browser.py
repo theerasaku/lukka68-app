@@ -94,7 +94,9 @@ def parse_financial_text(text):
 
     rows = []
     for y in years:
-        if any(v is not None for v in data[y].values()):
+        # เก็บเฉพาะปีที่มีตัวเลขหลักจริง — กันปี/เลขหลงมาจากส่วนอื่นของหน้ากลายเป็นแถวขยะ
+        core = ("revenue_main", "revenue_total", "total_expense", "net_profit")
+        if any(data[y].get(k) is not None for k in core):
             rows.append({"fiscal_year": y, **data[y]})
     return rows
 
@@ -112,6 +114,10 @@ def parse_profile_text(text):
     if m:
         out["registered_capital"] = _parse_number(m.group(1))
     m = re.search(r"(?:วันที่จดทะเบียน|จดทะเบียนจัดตั้ง|วันที่จัดตั้ง)[^\n]*?(?<!\d)(25\d\d)(?!\d)", text)
+    if not m:
+        # fallback: บรรทัดที่มีคำว่า จดทะเบียน + ชื่อเดือนไทย + ปี พ.ศ.
+        m = re.search(r"จดทะเบียน[^\n]{0,60}?(?:มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน"
+                      r"|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม)[^\n]*?(?<!\d)(25\d\d)(?!\d)", text)
     if m:
         out["registration_year"] = int(m.group(1))
     m = re.search(r"สถานะ\W*([^\n]+)", text)
@@ -119,8 +125,8 @@ def parse_profile_text(text):
         out["status"] = m.group(1).strip()
     m = re.search(r"กรรมการ[^\n]*\n((?:\s*(?:นาย|นาง|นางสาว|น\.ส\.)[^\n]+\n?)+)", text)
     if m:
-        names = [n.strip() for n in m.group(1).splitlines() if n.strip()]
-        out["directors"] = ", ".join(names)
+        names = [n.strip().rstrip("/").strip() for n in m.group(1).splitlines() if n.strip()]
+        out["directors"] = ", ".join(n for n in names if n)
     if "บริษัทจำกัด" in text or (out.get("company_name", "").startswith("บริษัท")):
         out["juristic_type"] = "บจก."
     elif "ห้างหุ้นส่วน" in text:
@@ -220,6 +226,8 @@ def lookup(query, headless=False, shots_dir=SHOTS_DIR, wait_ms=6000):
             result["screenshots"].append(shot)
             result["profile_text"] = page.inner_text("body")
             result["profile"] = parse_profile_text(result["profile_text"])
+            with open(os.path.join(shots_dir, f"{tax_id}_profile.txt"), "w", encoding="utf-8") as f:
+                f.write(result["profile_text"])  # ข้อความดิบไว้ debug parser
 
             # เปิดแท็บงบการเงิน
             fin_tab = page.get_by_text("ข้อมูลงบการเงิน").first
@@ -231,6 +239,8 @@ def lookup(query, headless=False, shots_dir=SHOTS_DIR, wait_ms=6000):
                 result["screenshots"].append(shot)
                 result["financial_text"] = page.inner_text("body")
                 result["financials"] = parse_financial_text(result["financial_text"])
+                with open(os.path.join(shots_dir, f"{tax_id}_financial.txt"), "w", encoding="utf-8") as f:
+                    f.write(result["financial_text"])
             else:
                 result["error"] = "ไม่พบแท็บ 'ข้อมูลงบการเงิน' บนหน้าโปรไฟล์"
         except Exception as e:
