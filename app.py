@@ -68,9 +68,8 @@ def search_dbd(company_name):
     return None
 
 def get_dbd_link(company_name):
-    """สร้าง URL ค้นหาตรงใน DBD Datawarehouse"""
-    encoded = urllib.parse.quote(company_name)
-    return f"https://datawarehouse.dbd.go.th/searchJuristic?juristicName={encoded}"
+    """ลิงก์ไปหน้าแรก DBD Datawarehouse (เว็บใหม่ไม่มี URL ค้นหาตรง — ต้องพิมพ์ในช่องค้นหาเอง)"""
+    return "https://datawarehouse.dbd.go.th/"
 
 try:
     df = load_data()

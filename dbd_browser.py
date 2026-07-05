@@ -128,42 +128,92 @@ def parse_profile_text(text):
     return out
 
 
+def _dismiss_popups(page):
+    """ปิด popup เตือนมิจฉาชีพ (#btnWarning) และแบนเนอร์คุกกี้ ถ้าโผล่ขึ้นมา"""
+    for selector in ("#btnWarning", "button:has-text('ยอมรับ')", "button:has-text('ปิด')"):
+        try:
+            btn = page.locator(selector).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+
+def _goto_first_profile(page, result, shots_dir, wait_ms):
+    """หลังค้นหา: กดลิงก์โปรไฟล์บริษัทตัวแรกที่เจอ (ทั้งใน dropdown แนะนำและหน้าผลค้นหา)
+    คืน True ถ้าไปถึงหน้าโปรไฟล์"""
+    if "/company/profile/" in page.url:
+        return True
+    link = page.locator("a[href*='/company/profile/']").first
+    if link.count() == 0:
+        shot = os.path.join(shots_dir, "search_results.png")
+        page.screenshot(path=shot, full_page=True)
+        result["screenshots"].append(shot)
+        return False
+    link.click()
+    page.wait_for_timeout(wait_ms)
+    _dismiss_popups(page)
+    return "/company/profile/" in page.url
+
+
 def lookup(query, headless=False, shots_dir=SHOTS_DIR, wait_ms=6000):
-    """เปิด Chrome ค้นหาบริษัทบน DBD แคปหน้าจอ และแกะข้อมูล
+    """เปิด Chrome เข้า datawarehouse.dbd.go.th พิมพ์ค้นหาในช่องค้นหาหน้าแรกเหมือนคนใช้จริง
+    กดค้นหา เข้าโปรไฟล์บริษัท แคปหน้าจอ และแกะข้อมูล
 
     query: ชื่อบริษัท / เลขทะเบียน 13 หลัก / URL หน้าโปรไฟล์
     headless=False จะเห็นหน้าต่าง Chrome ทำงานจริง (แนะนำ — ผ่านกันบอทง่ายกว่า)
     คืน dict: {tax_id, profile, financials, screenshots, profile_text, financial_text, error}
     """
     from playwright.sync_api import sync_playwright
-    from urllib.parse import quote
 
     os.makedirs(shots_dir, exist_ok=True)
     tax_id, profile_id = dbd_client.extract_juristic_id(query)
+    is_profile_url = "/company/profile/" in str(query)
     result = {"tax_id": tax_id, "screenshots": [], "error": None}
 
     with sync_playwright() as p:
         browser = _launch(p, headless)
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         try:
-            if not tax_id:
-                # ค้นหาด้วยชื่อ: เปิดหน้า search รอผล แล้วกดลิงก์โปรไฟล์ตัวแรก
-                page.goto(f"{BASE}/searchJuristic?juristicName={quote(query)}", timeout=60000)
+            if not is_profile_url:
+                # เข้าเว็บหน้าแรก ปิด popup แล้วพิมพ์ค้นหาในช่องค้นหาเหมือนคนใช้จริง
+                page.goto(BASE, timeout=60000)
                 page.wait_for_timeout(wait_ms)
-                shot = os.path.join(shots_dir, "search_results.png")
+                _dismiss_popups(page)
+
+                box = page.locator("input[placeholder*='ค้นหาด้วยชื่อ']").first
+                if box.count() == 0:
+                    box = page.locator("input[placeholder*='ค้นหา']").first
+                box.click()
+                box.type(str(query), delay=60)  # พิมพ์ทีละตัวเหมือนมนุษย์ ให้ dropdown แนะนำทำงาน
+                page.wait_for_timeout(2500)
+
+                shot = os.path.join(shots_dir, "search_typing.png")
                 page.screenshot(path=shot, full_page=True)
                 result["screenshots"].append(shot)
-                link = page.locator("a[href*='/company/profile/']").first
-                if link.count() == 0:
-                    result["error"] = ("ไม่พบลิงก์บริษัทในหน้าผลค้นหา — ดูสกรีนช็อต search_results.png "
-                                       "แล้วลองใช้เลขทะเบียน 13 หลักแทน")
-                    return result
-                href = link.get_attribute("href")
-                tax_id, profile_id = dbd_client.extract_juristic_id(href)
-                result["tax_id"] = tax_id
 
-            page.goto(f"{BASE}/company/profile/{profile_id}", timeout=60000)
-            page.wait_for_timeout(wait_ms)
+                # ทางที่ 1: dropdown แนะนำ (#suggestionContent) มีลิงก์โปรไฟล์ให้กดเลย
+                suggestion = page.locator("#suggestionContent a[href*='/company/profile/']").first
+                if suggestion.count() > 0:
+                    suggestion.click()
+                else:
+                    # ทางที่ 2: กด Enter/ปุ่มแว่นขยาย เพื่อไปหน้าผลค้นหา แล้วกดผลตัวแรก
+                    box.press("Enter")
+                page.wait_for_timeout(wait_ms)
+                _dismiss_popups(page)
+
+                if not _goto_first_profile(page, result, shots_dir, wait_ms):
+                    result["error"] = ("ค้นหาแล้วไม่พบลิงก์โปรไฟล์บริษัท — ดูสกรีนช็อตว่าเว็บแสดงอะไร "
+                                       "แล้วลองพิมพ์ชื่อให้ตรงกับชื่อจดทะเบียน หรือใช้เลขทะเบียน 13 หลัก")
+                    return result
+
+                tax_id, profile_id = dbd_client.extract_juristic_id(page.url)
+                result["tax_id"] = tax_id
+            else:
+                page.goto(f"{BASE}/company/profile/{profile_id}", timeout=60000)
+                page.wait_for_timeout(wait_ms)
+                _dismiss_popups(page)
 
             shot = os.path.join(shots_dir, f"{tax_id}_profile.png")
             page.screenshot(path=shot, full_page=True)
